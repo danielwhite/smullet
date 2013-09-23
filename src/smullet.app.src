@@ -1,0 +1,14 @@
+{application, smullet,
+ [
+  {description, "Smarter Bullet"},
+  {vsn, "0.0.2"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  cowboy,
+                  bullet,
+                  gproc
+                 ]},
+  {env, []}
+ ]}.
