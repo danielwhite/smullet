@@ -4,7 +4,7 @@
 %% API
 -export([start_link/3]).
 -export([new/2, ensure_started/2]).
--export([find/1, send/2, recv/1]).
+-export([find/1, send/3, recv/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -82,16 +82,30 @@ ensure_started(Supervisor, SessionKey) ->
 %% @doc Delivers a message to a subscribed handler or stores until
 %%      such handler subscribes. If no handler appears until session
 %%      is terminated due to inactivity ALL SUCH MESSAGES ARE LOST!
-send(undefined, _) ->
-    not_found;
-send(Session, Msg) when is_pid(Session) ->
-    gen_server:call(Session, {send, Msg}).
+%%      If `Timeout' is `async' then function returnes immediately
+%%      after the message is stored for the delivery. Otherwise
+%%      function returns after the message is delivered to the handler
+%%      or fails if it is not delivered in that amount of time.
+-spec send(session(), Msg, Timeout) -> ok when Msg :: term(),
+                                               Timeout :: timeout() | async | infinity.
+send(Session, Msg, async) when is_pid(Session) ->
+    gen_server:call(Session, {send, Msg, async});
+send(Session, Msg, infinity) when is_pid(Session) ->
+    gen_server:call(Session, {send, Msg, infinity}, infinity);
+send(Session, Msg, Timeout) when is_pid(Session) ->
+    WaitTill = milliseconds() + Timeout,
+    gen_server:call(Session, {send, Msg, WaitTill}, Timeout).
+
+
+milliseconds() ->
+    {Megas, Secs, Millis} = os:timestamp(),
+    (Megas * 1000000 + Secs) * 1000000 + Millis.
 
 
 %% @doc Subscribes calling process for a message delivery.
--spec recv(undefined | session()) -> reference() | not_found.
-recv(undefined) ->
-    not_found;
+%%      The message will be asynchronously delivered to the caller
+%%      message queue as `{Tag, Msg}'.
+-spec recv(session()) -> Tag when Tag :: reference().
 recv(Session) when is_pid(Session) ->
     gen_server:call(Session, recv).
 
@@ -122,21 +136,39 @@ start_timer(#state{timeout=Timeout} = State) ->
     State#state{ref=erlang:start_timer(Timeout, self(), inactive_message)}.
 
 
+send_ack(async, _) ->
+    ok;
+send_ack(infinity, From) ->
+    gen_server:reply(From, ok);
+send_ack(WaitUntill, From) ->
+    case milliseconds() of
+        Milliseconds when Milliseconds < WaitUntill ->
+            gen_server:reply(From, ok);
+        _ ->
+            ok
+    end.
+
+
 %% @private
 %%
 %% Store a message to be delivered later.
-handle_call({send, Msg}, _, #state{handler=undefined, messages=Messages} = State) ->
-    Msgs = queue:in(Msg, Messages),
+handle_call({send, Msg, async}, _, #state{handler=undefined, messages=Messages} = State) ->
+    Msgs = queue:in({async, undefined, Msg}, Messages),
     {reply, ok, State#state{messages=Msgs}};
 
+%% Store a message to be delivered and acknowledged later.
+handle_call({send, Msg, Type}, From, #state{handler=undefined, messages=Messages} = State) ->
+    Msgs = queue:in({Type, From, Msg}, Messages),
+    {noreply, State#state{messages=Msgs}};
+
 %% Send a message to already subscribed handler, start inactivity timer.
-handle_call({send, Msg}, _, #state{handler=Pid, ref=Ref} = State) ->
+handle_call({send, Msg, Type}, From, #state{handler=Pid, ref=Ref} = State) ->
     %% Subscription only happens when there are no messages in the queue.
     %% So the queue must be empty here, let's ensure that.
     true = queue:is_empty(State#state.messages),
     erlang:demonitor(Ref),
-    send_message(Pid, Ref, Msg),
-    {reply, ok, start_timer(State#state{handler=undefined})};
+    send_message(Pid, Ref, Msg, Type, From),
+    {noreply, start_timer(State#state{handler=undefined})};
 
 %% Stop inactivity timer. Subscribe if no messages to deliver,
 %% else send one message and start inactivity timer again.
@@ -146,9 +178,9 @@ handle_call(recv, {Pid, _}, #state{handler=undefined, messages=Messages} = State
                    {empty, _} ->
                        Ref = erlang:monitor(process, Pid),
                        State#state{handler=Pid, ref=Ref};
-                   {{value, Msg}, Msgs} ->
+                   {{value, {Type, From, Msg}}, Msgs} ->
                        Ref = make_ref(),
-                       send_message(Pid, Ref, Msg),
+                       send_message(Pid, Ref, Msg, Type, From),
                        start_timer(State#state{messages=Msgs})
                end,
     {reply, Ref, NewState};
@@ -173,8 +205,9 @@ cancel_timer(Timer) ->
     end.
 
 
-send_message(Pid, Ref, Msg) ->
-    Pid ! {Ref, Msg}.
+send_message(Pid, Ref, Msg, Type, From) ->
+    Pid ! {Ref, Msg},
+    send_ack(Type, From).
 
 
 %% @private

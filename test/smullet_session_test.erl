@@ -16,7 +16,23 @@ sessions_test_() ->
     {setup,
      fun setup/0,
      fun cleanup/1,
-     fun sessions/0}.
+     {inorder, [fun sessions/0,
+                {inparallel, [fun undelivered_fail/0,
+                              fun dead_session/0
+                             ]}
+               ]}
+    }.
+
+
+undelivered_fail() ->
+    ?assertMatchEx({ok, S}, smullet_session:new(?MODULE, 3)),
+    ?assertExit({timeout, _}, smullet_session:send(S, undelivered, 100)).
+
+
+dead_session() ->
+    ?assertMatchEx({ok, S}, smullet_session:new(?MODULE, 4)),
+    ?assertExit({{shutdown, inactive}, _}, smullet_session:send(S, undelivered, infinity)).
+
 
 sessions() ->
     %% create sessions
@@ -30,15 +46,15 @@ sessions() ->
     Ref1 = ?assertRef(smullet_session:recv(S1)),
     Ref2 = ?assertRef(smullet_session:recv(S2)),
 
-    %% impossible to subscribe if anyone is already subscribed to session
+    %% impossible to subscribe if someone is already subscribed to session
     ?assertMatch(error, smullet_session:recv(S1)),
 
-    %% this message that is immediately sent to the subscriber
-    ?assertMatch(ok, smullet_session:send(S1, m1)),
+    %% this message is immediately sent to the subscriber
+    ?assertMatch(ok, smullet_session:send(S1, m1, 1000)),
     ?assertMatch({msg, {Ref1, m1}}, msg()),
 
     %% this message is saved for next delivery
-    ?assertMatch(ok, smullet_session:send(S1, m2)),
+    ?assertMatch(ok, smullet_session:send(S1, m2, async)),
     ?assertMatch(no_msg, msg()),
 
     %% now it is delivered
@@ -48,10 +64,10 @@ sessions() ->
     %% session is terminated due to inactivity
     ?assertMatch(ok, timer:sleep(?t + ?t)),
     ?assertMatch(undefined, smullet_session:find(1)),
-    ?assertExit({noproc, _}, smullet_session:send(S1, m3)),
+    ?assertExit({noproc, _}, smullet_session:send(S1, m3, infinity)),
 
     %% but second is alive because was subscribed to
-    ?assertMatchEx(ok, smullet_session:send(smullet_session:find(2), n1)),
+    ?assertMatchEx(ok, smullet_session:send(smullet_session:find(2), n1, infinity)),
     ?assertMatch({msg, {Ref2, n1}}, msg()).
 
 
