@@ -5,64 +5,74 @@
 -export([init/4, stream/3, info/3, terminate/2]).
 
 
--callback session(Req) -> {ok, Session, Req}
-                              | {not_found, Req}
-                              when Req :: cowboy_req:req(),
-                                   Session :: smullet_session:session().
--callback info(Msg) -> {reply, Data}
-                           | ok | shutdown
+-callback session_id(Req) -> {ok, SessionId, Req} | {shutdown, Req}
+                                 when Req :: cowboy_req:req(),
+                                      SessionId :: term().
+-callback session(SessionId) -> {ok, Session} | not_found
+                                    when SessionId :: term(),
+                                         Session :: smullet_session:session().
+-callback info(Msg) -> {reply, Data} | ok
                            when Msg :: term(),
                                 Data :: iodata().
+-callback stream(Data, SessionId) -> {reply, Data} | ok
+                                         when Data :: iodata(),
+                                              SessionId :: term().
 
-
--record(state, {active, session, handler, ref}).
+-record(state, {active, handler, session_id, session, ref}).
 
 
 init(_Transport, Req, Opts, Active) ->
     {_, Handler} = lists:keyfind(smullet_handler, 1, Opts),
-    case Handler:session(Req) of
-        {ok, Session, Req1} ->
-            Ref = case Active of
-                      false ->
-                          unefined;
-                      _ when Active =:= once; Active =:= true ->
-                          smullet_session:recv(Session)
-                  end,
-            {ok, Req1, #state{active = Active, session = Session,
-                              handler = Handler, ref = Ref}};
-        {not_found, Req1} ->
+    case Handler:session_id(Req) of
+        {ok, SessionId, Req1} when Active =:= false ->
+            {ok, Req1, #state{active = false, handler = Handler,
+                              session_id = SessionId}};
+        {ok, SessionId, Req1} when Active =:= once; Active =:= true ->
+            case Handler:session(SessionId) of
+                {ok, Session} ->
+                    Ref = smullet_session:recv(Session),
+                    {ok, Req, #state{active = Active, handler = Handler,
+                                     session_id = SessionId,
+                                     session = Session, ref = Ref}};
+                not_found ->
+                    {shutdown, Req1, undefined}
+            end;
+        {shutdown, Req1} ->
             {shutdown, Req1, undefined}
     end.
 
 
-stream(_Data, Req, State) ->
-    lager:debug("client sent: ~p", [_Data]),
-    {ok, Req, State}.
+stream(Data, Req, #state{handler=Handler, session_id=SessionId} = State) ->
+    case Handler:stream(Data, SessionId) of
+        {reply, Msg} ->
+            {reply, Msg, Req, State};
+        ok ->
+            {ok, Req, State}
+    end.
 
 
-info({Ref, Info}, Req, #state{ref=Ref, handler=Handler, active=Active, session=Session} = State) ->
+info({Ref, Info}, Req, #state{ref=Ref, handler=Handler} = State)
+  when Ref =/= undefined ->
     case Handler:info(Info) of
-        shutdown ->
-            {shutdown, Req, State};
-        Result ->
-            NewState = if Active -> State#state{ref=smullet_session:recv(Session)};
-                          true -> State
-                       end,
-            case Result of
-                {reply, Msg} ->
-                    {reply, Msg, Req, NewState};
-                ok ->
-                    {ok, Req, NewState}
-            end
+        {reply, Msg} ->
+            {reply, Msg, Req, resubscribe(State)};
+        ok ->
+            {ok, Req, resubscribe(State)}
     end;
 info(Info, Req, #state{handler=Handler}=State) ->
     case Handler:info(Info) of
         {reply, Msg} ->
             {reply, Msg, Req, State};
-        Other when Other =:= ok; Other =:= shutdown ->
-            {Other, Req, State}
+        ok ->
+            {ok, Req, State}
     end.
 
 
+resubscribe(#state{active=true, session=Session} = State) ->
+    State#state{ref = smullet_session:recv(Session)};
+resubscribe(State) ->
+    State.
+
+
 terminate(_Req, State) ->
-    lager:info("terminating: ~p", [State]).
+    error_logger:info_msg("terminating: ~p", [State]).
