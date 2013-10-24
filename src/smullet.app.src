@@ -10,5 +10,6 @@
                   bullet,
                   gproc
                  ]},
+  {mod, {smullet_app, []}},
   {env, []}
  ]}.
