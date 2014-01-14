@@ -6,8 +6,6 @@
   {applications, [
                   kernel,
                   stdlib,
-                  cowboy,
-                  bullet,
                   gproc
                  ]},
   {mod, {smullet_app, []}},
